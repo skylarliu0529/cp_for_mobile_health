@@ -21,7 +21,7 @@ def set_random_seed(seed):
     np.random.seed(seed)
 if __name__ == "__main__":
     set_random_seed(20)
-##################################IDLFM###########################
+################################## IDLFM ###########################
 def generate_data(n_patients, n_var, T, idx_x, idx_y, rank, k, N):
         D = N-k
         Fx = np.random.randn(n_var,rank)
@@ -185,8 +185,11 @@ D = N-k-1 # # of base spline function, determined by # of knots and smooth degre
 
 ############### Multiresolution#########################
 idx_x = sparse.random((I, J-1, T), density = 0.8)
+# idx_y = sparse.random((I, 1, T), density = 0.2)
 idx_y_train = sparse.random((I, 1, T), density = 0.2)
-idx_y_test = sparse.random((I, 1, T), density = 0.2)
+# idx_y_train = randomly choose 0.8 of idx_y
+# idx_y_cal = the remaining 0.2 of idx_y
+idx_y_cal = sparse.random((I, 1, T), density = 0.2)
 
 data = generate_data(I, J-1, T, idx_x, idx_y_train, R, k, N)
 print(data)
@@ -223,7 +226,7 @@ def y_pred(weights, knots, F, n_patients, idx_y, rank, k):
         return output
 Y_cal_hat = y_pred(weights, knots, F, I, idx_y_test, R, k)
 print(Y_cal_hat)
-#######################nonconformity Scores#####################
+####################### nonconformity scores #####################
 def calculate_nonconformity_score(Y_cal, Y_cal_hat):
     assert Y_cal.shape == Y_cal_hat.shape, "Shapes of Y_cal and Y_cal_hat do not match."
     nonconformity_scores = np.abs(Y_cal.data - Y_cal_hat.data)
@@ -232,55 +235,58 @@ def calculate_nonconformity_score(Y_cal, Y_cal_hat):
 
 nonconformity_scores = calculate_nonconformity_score(Y_cal, Y_cal_hat)
 print("Nonconformity Scores:", nonconformity_scores)
-####################Standard ACI################################
-def calculate_alpha_tilde(Y_cal, Y_cal_hat, nonconformity_scores, alpha, eta=0.005):
- 
+
+###############Simplified ACI###################
+def calculate_alpha_tilde_simplified_ACI(Y_cal, Y_cal_hat, nonconformity_scores, alpha, delta, alpha_tilde_int):
     Y_cal_values = Y_cal.data  
-    Y_cal_hat_values = Y_cal_hat.data  
-    
-    alpha_tilde = alpha
+    Y_cal_hat_values = Y_cal_hat.data 
+
+    alpha_tilde = alpha_tilde_int  
+    N_cal = len(Y_cal_values)  
+    iteration = 0  
+
     alpha_tilde_history = []
-    for k, (Y_k, Y_hat_k) in enumerate(zip(Y_cal_values, Y_cal_hat_values)):
-        if k == 0:
-            continue  
-        
+    threshold_history = []
+    outside_rate_history = []
+
+    while True:
+        iteration += 1 
+        alpha_tilde_history.append(alpha_tilde) 
         threshold = np.quantile(nonconformity_scores, 1 - alpha_tilde)
+        threshold_history.append(threshold)  
+        outside_count = 0
+        for Y_k, Y_hat_k in zip(Y_cal_values, Y_cal_hat_values):
+            interval_lower = Y_hat_k - threshold
+            interval_upper = Y_hat_k + threshold
+            if Y_k < interval_lower or Y_k > interval_upper:
+                outside_count += 1
         
-        interval_lower = Y_hat_k - threshold
-        interval_upper = Y_hat_k + threshold
-        in_interval = interval_lower <= Y_k <= interval_upper
-        
-        alpha_tilde = alpha_tilde - eta * (1 if not in_interval else 0 - alpha)
-        alpha_tilde_history.append(alpha_tilde)
-      
-        print(f"Iteration {k}:")
+        outside_rate = outside_count / N_cal
+        outside_rate_history.append(outside_rate)
+        print(f"Iteration {iteration}:")
         print(f"  alpha_tilde = {alpha_tilde}")
-        print(f"  Prediction interval for Y_hat_k = [{interval_lower}, {interval_upper}]")
-        print(f"  Y_k = {Y_k} {'within' if in_interval else 'outside'} the interval\n")
+        print(f"  Threshold = {threshold}")
+        print(f"  Outside count = {outside_count}")
+        print(f"  Outside rate = {outside_rate}")
         
-        if alpha_tilde <= 0 or alpha_tilde >= 1:
-            print("Convergence reached. Exiting.")
+        if alpha - delta <= outside_rate <= alpha + delta:
+            print("Convergence achieved within the specified range.")
             break
+        if outside_rate < alpha - delta:
+            alpha_tilde += delta
+        elif outside_rate > alpha + delta:
+            alpha_tilde -= delta
+        alpha_tilde = max(0, min(1, alpha_tilde))
     
-    return alpha_tilde, alpha_tilde_history
+    return alpha_tilde, alpha_tilde_history, threshold_history, outside_rate_history
 
+# Example 
 alpha = 0.1  
-eta = 0.0005   
-nonconformity_scores = calculate_nonconformity_score(Y_cal, Y_cal_hat)
-alpha_tilde, alpha_tilde_history = calculate_alpha_tilde(Y_cal, Y_cal_hat, nonconformity_scores, alpha, eta)
-print("Final adjusted significance level (alpha_tilde):", alpha_tilde)
+delta = 0.005  
+nonconformity_scores = calculate_nonconformity_score(Y_cal, Y_cal_hat) 
+alpha_tilde, alpha_tilde_history, threshold_history, outside_rate_history = calculate_alpha_tilde_simplified_ACI(Y_cal, Y_cal_hat, nonconformity_scores, alpha, delta, 0.2)
 
 print("Final adjusted significance level (alpha_tilde):", alpha_tilde)
-
-# Plot the trend of alpha_tilde over iterations
-import matplotlib.pyplot as plt
-plt.plot(alpha_tilde_history, marker='o', markersize=1)
-plt.xlabel('Iteration')
-plt.ylabel('alpha_tilde')
-plt.title('Trend of alpha_tilde over Iterations')
-plt.grid(True)
-plt.show()
-
 ##################Predict Interval###################
 def prediction_interval(Y_cal_hat, nonconformity_scores, alpha_tilde):
     threshold = np.quantile(nonconformity_scores, 1 - alpha_tilde)
@@ -295,44 +301,3 @@ def prediction_interval(Y_cal_hat, nonconformity_scores, alpha_tilde):
     
     return prediction_intervals_dict
 prediction_intervals_dict = prediction_interval(Y_cal_hat, nonconformity_scores, alpha_tilde)
-
-
-###############Simplified ACI###################
-def calculate_alpha_tilde_simplified_ACI(Y_cal, Y_cal_hat, nonconformity_scores, alpha, delta, max_iter=100):
-    Y_cal_values = Y_cal.data  
-    Y_cal_hat_values = Y_cal_hat.data  
-
-    alpha_tilde = alpha
-    N_cal = len(Y_cal_values)  
-
-    for iteration in range(max_iter):
-        threshold = np.quantile(nonconformity_scores, 1 - alpha_tilde)
-        outside_count = 0
-        for Y_k, Y_hat_k in zip(Y_cal_values, Y_cal_hat_values):
-    
-            interval_lower = Y_hat_k - threshold
-            interval_upper = Y_hat_k + threshold
-            if Y_k < interval_lower or Y_k > interval_upper:
-                outside_count += 1
-        
-        empirical_error = outside_count / N_cal - alpha
-        
-        print(f"Iteration {iteration + 1}:")
-        print(f"  alpha_tilde = {alpha_tilde}")
-        print(f"  Threshold = {threshold}")
-        print(f"  Outside count = {outside_count}")
-        print(f"  Empirical error = {empirical_error}")
-
-        if abs(empirical_error) <= delta:
-            print("Convergence achieved within tolerance.")
-            break
-    
-        alpha_tilde += delta * np.sign(empirical_error)
-        alpha_tilde = max(0, min(1, alpha_tilde))
-    
-    return alpha_tilde
-
-alpha = 0.1  
-delta = 0.005  
-alpha_tilde = calculate_alpha_tilde_simplified_ACI(Y_cal, Y_cal_hat, nonconformity_scores, alpha, delta)
-print("Final adjusted significance level (alpha_tilde):", alpha_tilde)
